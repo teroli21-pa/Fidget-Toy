@@ -70,6 +70,16 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f8f7f4;font-family:
 .cdot{width:28px;height:28px;border-radius:50%;cursor:pointer;border:2px solid transparent;flex-shrink:0}
 .cdot.sel{border-color:var(--text)}
 .clr-btn{font-size:12px;padding:5px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);cursor:pointer;color:var(--muted);font-family:inherit}
+.settings-wrap{width:90%;max-width:320px;display:flex;flex-direction:column;gap:14px}
+.settings-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px}
+.settings-title{font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px}
+.settings-desc{font-size:12px;color:var(--muted);line-height:1.4;margin-bottom:12px}
+.settings-btn{width:100%;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
+.save-on{background:var(--purple);color:white}
+.save-off{background:#777;color:white}
+.danger{border-color:#E1B8B8}
+.danger-btn{background:#D9534F;color:white}
+.settings-btn:active{transform:scale(.97)}
 </style>
 </head>
 <body>
@@ -104,6 +114,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f8f7f4;font-family:
     <button class="tab" onclick="gotoFace(3,this)">&#x1F300;</button>
     <button class="tab" onclick="gotoFace(4,this)">&#x1F3B5;</button>
     <button class="tab" onclick="gotoFace(5,this)">&#x270F;&#xFE0F;</button>
+    <button class="tab" onclick="gotoFace(6,this)">&#9881;&#65039;</button>
   </div>
 
   <!-- FACE: BUTTONS -->
@@ -189,6 +200,23 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f8f7f4;font-family:
     </div>
   </div>
 
+  <!-- FACE: SETTINGS -->
+  <div class="face" id="f6" style="display:none">
+    <span class="face-lbl">settings</span>
+    <div class="settings-wrap">
+      <div class="settings-card">
+        <div class="settings-title">Progress Saving</div>
+        <div class="settings-desc">Automatically save your score, level, stats and challenge progress.</div>
+        <button id="saveToggleBtn" class="settings-btn save-on">Saving ON</button>
+      </div>
+      <div class="settings-card danger">
+        <div class="settings-title">Reset Progress</div>
+        <div class="settings-desc">Delete all saved progress and start from level 1.</div>
+        <button id="resetProgressBtn" class="settings-btn danger-btn">Reset Progress</button>
+      </div>
+    </div>
+  </div>
+
   <div class="stats">
     <div class="stat"><div class="stat-v" id="st0">0</div><div class="stat-l">taps</div></div>
     <div class="stat"><div class="stat-v" id="st1">1</div><div class="stat-l">best combo</div></div>
@@ -198,7 +226,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f8f7f4;font-family:
 </div>
 
 <script>
-/* ── Audio & Haptics ── */
+/* ── Audio and Haptics ── */
 const AC = (() => {
   const C = window.AudioContext || window.webkitAudioContext;
   return C ? new C() : null;
@@ -232,6 +260,9 @@ const dcEl=$('dc'), dctx=dcEl.getContext('2d');
 
 /* ── Game State ── */
 let score=0, xp=0, lv=1, cb=0, cbt=null, bestCb=1, taps=0, totalSpin=0;
+const SAVE_KEY = 'fidgetCubeSave';
+let saveEnabled = true;
+let saveTimer = null;
 const xpForNext = () => lv * 100;
 
 /* ── Challenges ── */
@@ -265,12 +296,13 @@ function progressChallenge(type, amt) {
       chBarEl.classList.remove('flash');
       chFlashTimer = null;
       ci++;
+      queueSave();
       loadChallenge();
     }, 500);
   }
 }
 
-/* ── Popups & Level-up ── */
+/* ── Popups and Level-up ── */
 function spawnPopup(text, el) {
   const r = el.getBoundingClientRect();
   const p = document.createElement('div');
@@ -309,6 +341,7 @@ function addScore(pts, el) {
   xpmaxEl.textContent  = xpForNext();
   xpbarEl.style.width  = (xp / xpForNext() * 100).toFixed(1) + '%';
   if (el) spawnPopup('+' + earned, el);
+  queueSave();
 }
 
 /* ── Face Switcher ── */
@@ -345,6 +378,7 @@ function swFlip(i, pts) {
   $('sw' + i).classList.toggle('on', swState[i]);
   addScore(pts, $('f1'));
   progressChallenge('sw');
+  queueSave();
 }
 
 /* ── Joystick ── */
@@ -533,13 +567,116 @@ dcEl.addEventListener('pointermove', e => {
   drawStrokes++;
   if (drawStrokes % 8 === 0) addScore(2);
 });
+
 function drawStop(sound) { drawActive = false; drawLast = null; if (sound) beep(330, .06, .08); }
 dcEl.addEventListener('pointerup',     () => drawStop(true));
 dcEl.addEventListener('pointercancel', () => drawStop(false));
 dcEl.addEventListener('pointerleave',  () => drawStop(false));
 
+/* ── Save / Load ── */
+function getSaveData() {
+  return { version:1, score, xp, lv, taps, bestCb, totalSpin, ci, cp, swState, saveEnabled };
+}
+
+function queueSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveGame, 1000);
+}
+
+function saveGame() {
+  if (!saveEnabled) return;
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(getSaveData()));
+  } catch(err) {
+    console.error('Save failed', err);
+  }
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    score       = data.score       ?? 0;
+    xp          = data.xp          ?? 0;
+    lv          = data.lv          ?? 1;
+    taps        = data.taps        ?? 0;
+    bestCb      = data.bestCb      ?? 1;
+    totalSpin   = data.totalSpin   ?? 0;
+    ci          = data.ci          ?? 0;
+    cp          = data.cp          ?? 0;
+    saveEnabled = data.saveEnabled ?? true;
+    if (Array.isArray(data.swState)) {
+      swState.length = 0;
+      data.swState.forEach(s => swState.push(s));
+    }
+    return true;
+  } catch(err) {
+    console.error('Load failed', err);
+    return false;
+  }
+}
+
+function refreshUI() {
+  scoreEl.textContent  = score.toLocaleString();
+  lvlEl.textContent    = lv;
+  xpEl.textContent     = Math.round(xp);
+  xpmaxEl.textContent  = xpForNext();
+  xpbarEl.style.width  = (xp / xpForNext() * 100) + '%';
+  stEls[0].textContent = taps;
+  stEls[1].textContent = bestCb;
+  stEls[2].textContent = Math.round(totalSpin) + '°';
+  stEls[3].textContent = lv;
+  swState.forEach((state, i) => { $('sw' + i).classList.toggle('on', state); });
+  const c = CHALLENGES[ci % CHALLENGES.length];
+  chtEl.textContent = c.t;
+  chpEl.textContent = Math.min(cp, c.n) + '/' + c.n;
+}
+
+/* ── Settings UI ── */
+const saveToggleBtn    = $('saveToggleBtn');
+const resetProgressBtn = $('resetProgressBtn');
+
+function updateSaveButton() {
+  if (saveEnabled) {
+    saveToggleBtn.textContent = 'Saving ON';
+    saveToggleBtn.className   = 'settings-btn save-on';
+  } else {
+    saveToggleBtn.textContent = 'Saving OFF';
+    saveToggleBtn.className   = 'settings-btn save-off';
+  }
+}
+
+saveToggleBtn.addEventListener('click', () => {
+  saveEnabled = !saveEnabled;
+  updateSaveButton();
+  if (saveEnabled) {
+    saveGame();                         // persist immediately when re-enabling
+  } else {
+    localStorage.removeItem(SAVE_KEY); // wipe storage when disabling
+  }
+});
+
+resetProgressBtn.addEventListener('click', () => {
+ 
+  const answer = prompt('Type RESET to delete all progress');
+  if (answer !== 'RESET') return;
+  localStorage.removeItem(SAVE_KEY);
+  saveEnabled = false;
+  saveToggleBtn.textContent = 'Saving OFF';
+  saveToggleBtn.className   = 'settings-btn save-off';
+  localStorage.removeItem(SAVE_KEY);
+  alert('Progress deleted. Restarting…');
+  location.reload();
+});
+
+window.addEventListener('beforeunload', saveGame);
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
+
 /* ── Init ── */
 loadChallenge();
+if (loadGame()) refreshUI();
+updateSaveButton();
 </script>
 </body>
 </html>
