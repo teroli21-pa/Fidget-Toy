@@ -80,6 +80,24 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f8f7f4;font-family:
 .danger{border-color:#E1B8B8}
 .danger-btn{background:#D9534F;color:white}
 .settings-btn:active{transform:scale(.97)}
+
+.fullscreen-on{
+  background:var(--surface);
+  color:var(--text);
+  border:1px solid var(--border);
+}
+
+.fullscreen-off{
+  background:var(--purple);
+  color:#fff;
+  border:1px solid var(--purple-dark);
+}
+
+.fullscreen-on:active,
+.fullscreen-off:active{
+  transform:scale(.97);
+}
+
 </style>
 </head>
 <body>
@@ -205,9 +223,19 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f8f7f4;font-family:
     <span class="face-lbl">settings</span>
     <div class="settings-wrap">
       <div class="settings-card">
+      <div class="settings-title">Fullscreen Mode</div>
+       <div class="settings-desc">
+        Enter fullscreen for a more immersive experience.
+       </div>
+       <button id="fullscreenBtn" class="settings-btn fullscreen-on">
+         \u26F6 Fullscreen OFF
+       </button>
+      </div>
+      <div class="settings-card">
         <div class="settings-title">Progress Saving</div>
         <div class="settings-desc">Automatically save your score, level, stats and challenge progress.</div>
         <button id="saveToggleBtn" class="settings-btn save-on">Saving ON</button>
+        <button onclick="saveGameManually();" style="margin-top: 5%" class="settings-btn save-on">Save Manually</button>
       </div>
       <div class="settings-card danger">
         <div class="settings-title">Reset Progress</div>
@@ -592,6 +620,10 @@ function saveGame() {
   }
 }
 
+function saveGameManually() {
+  localStorage.setItem(SAVE_KEY, JSON.stringify(getSaveData()));
+};
+
 function loadGame() {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
@@ -640,21 +672,24 @@ const resetProgressBtn = $('resetProgressBtn');
 function updateSaveButton() {
   if (saveEnabled) {
     saveToggleBtn.textContent = 'Saving ON';
-    saveToggleBtn.className   = 'settings-btn save-on';
+    saveToggleBtn.className = 'settings-btn save-on';
   } else {
     saveToggleBtn.textContent = 'Saving OFF';
-    saveToggleBtn.className   = 'settings-btn save-off';
+    saveToggleBtn.className = 'settings-btn save-off';
   }
 }
 
 saveToggleBtn.addEventListener('click', () => {
   saveEnabled = !saveEnabled;
-  updateSaveButton();
-  if (saveEnabled) {
-    saveGame();                         // persist immediately when re-enabling
-  } else {
-    localStorage.removeItem(SAVE_KEY); // wipe storage when disabling
+
+  try {
+    const data = getSaveData();
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  } catch (err) {
+    console.error(err);
   }
+
+  updateSaveButton();
 });
 
 resetProgressBtn.addEventListener('click', () => {
@@ -672,6 +707,56 @@ resetProgressBtn.addEventListener('click', () => {
 
 window.addEventListener('beforeunload', saveGame);
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
+
+const fullscreenBtn = document.getElementById("fullscreenBtn");
+
+function isFullscreen() {
+  return !!(
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.mozFullScreenElement ||
+    document.msFullscreenElement
+  );
+}
+
+async function toggleFullscreen() {
+  try {
+    if (isFullscreen()) {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      }
+    } else {
+      const el = document.documentElement;
+
+      if (el.requestFullscreen) {
+        await el.requestFullscreen();
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+      }
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function updateFullscreenButton() {
+  if (isFullscreen()) {
+    fullscreenBtn.textContent = "\u26F6 Fullscreen ON";
+    fullscreenBtn.className = "settings-btn fullscreen-off";
+  } else {
+    fullscreenBtn.textContent = "\u26F6 Fullscreen OFF";
+    fullscreenBtn.className = "settings-btn fullscreen-on";
+  }
+}
+
+fullscreenBtn.addEventListener("click", toggleFullscreen);
+
+document.addEventListener("fullscreenchange", updateFullscreenButton);
+document.addEventListener("webkitfullscreenchange", updateFullscreenButton);
+
+updateFullscreenButton();
 
 /* ── Init ── */
 loadChallenge();
