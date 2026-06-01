@@ -98,6 +98,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f8f7f4;font-family:
   transform:scale(.97);
 }
 
+
+
+/* Performance hints */
+.popup,.lvup,.game-btn,.joy-nub,.spin-ring,.spin-inner{will-change:transform,opacity}
+.face{contain:layout paint style}
+#pop-layer{contain:layout paint style}
+.xp-fill,.combo,.ch-bar,.sw-track,.sw-thumb{will-change:transform,opacity,width,background,border-color}
+
 </style>
 </head>
 <body>
@@ -254,13 +262,29 @@ html,body{width:100%;height:100%;overflow:hidden;background:#f8f7f4;font-family:
 </div>
 
 <script>
+
+/* ── Performance Tunables ── */
+const SAVE_KEY = 'fidgetCubeSave';
+const SAVE_DELAY = 1200;
+const SCORE_UI_FRAME_DELAY = 0;
+const MAX_POPUPS = 8;
+const POPUP_MIN_GAP = 55;
+const BEEP_MIN_GAP = 35;
+const VIB_MIN_GAP = 45;
+const SPINNER_SCORE_GAP = 120;
+const DIAL_SCORE_GAP = 120;
+const CHALLENGE_UI_GAP = 80;
+
 /* ── Audio and Haptics ── */
 const AC = (() => {
   const C = window.AudioContext || window.webkitAudioContext;
   return C ? new C() : null;
 })();
+let lastBeepAt = 0;
 function beep(freq, dur, vol) {
-  if (!AC) return;
+  const now = performance.now();
+  if (!AC || now - lastBeepAt < BEEP_MIN_GAP) return;
+  lastBeepAt = now;
   if (AC.state === 'suspended') AC.resume();
   try {
     const o = AC.createOscillator(), g = AC.createGain();
@@ -272,7 +296,14 @@ function beep(freq, dur, vol) {
     o.start(t); o.stop(t + (dur || 0.08));
   } catch(_) {}
 }
-function vib(ms) { navigator.vibrate && navigator.vibrate(ms || 20); }
+let lastVibAt = 0;
+function vib(ms) {
+  const now = performance.now();
+  if (navigator.vibrate && now - lastVibAt >= VIB_MIN_GAP) {
+    lastVibAt = now;
+    navigator.vibrate(ms || 20);
+  }
+}
 
 /* ── DOM Cache ── */
 const $ = id => document.getElementById(id);
@@ -284,14 +315,43 @@ const popLayer=$('pop-layer');
 const jbEl=$('jb'), jnEl=$('jn'), jlEl=$('jl');
 const srEl=$('sr'), siEl=$('si');
 const dsvgEl=$('dsvg'), dhEl=$('dh'), dlEl=$('dl'), dpEl=$('dp');
-const dcEl=$('dc'), dctx=dcEl.getContext('2d');
+const dcEl=$('dc'), dctx=dcEl.getContext('2d', { alpha:true });
 
 /* ── Game State ── */
 let score=0, xp=0, lv=1, cb=0, cbt=null, bestCb=1, taps=0, totalSpin=0;
-const SAVE_KEY = 'fidgetCubeSave';
 let saveEnabled = true;
 let saveTimer = null;
+let uiRAF = 0;
+let statsDirty = false;
+let scoreDirty = false;
+let xpDirty = false;
 const xpForNext = () => lv * 100;
+
+function scheduleUI(opts={}) {
+  scoreDirty = scoreDirty || !!opts.score;
+  xpDirty = xpDirty || !!opts.xp;
+  statsDirty = statsDirty || !!opts.stats;
+  if (uiRAF) return;
+  uiRAF = requestAnimationFrame(flushUI);
+}
+
+function flushUI() {
+  uiRAF = 0;
+  if (scoreDirty) scoreEl.textContent = score.toLocaleString();
+  if (xpDirty) {
+    lvlEl.textContent    = lv;
+    xpEl.textContent     = Math.round(xp);
+    xpmaxEl.textContent  = xpForNext();
+    xpbarEl.style.width  = (xp / xpForNext() * 100).toFixed(1) + '%';
+  }
+  if (statsDirty) {
+    stEls[0].textContent = taps;
+    stEls[1].textContent = bestCb;
+    stEls[2].textContent = Math.round(totalSpin) + '°';
+    stEls[3].textContent = lv;
+  }
+  scoreDirty = xpDirty = statsDirty = false;
+}
 
 /* ── Challenges ── */
 const CHALLENGES = [
@@ -302,7 +362,7 @@ const CHALLENGES = [
   { t:'tap the ⭐ button 3 times', type:'star',  n:3,    p:45  },
   { t:'tap 10 times fast',         type:'click', n:10,   p:100 },
 ];
-let ci=0, cp=0, chFlashTimer=null;
+let ci=0, cp=0, chFlashTimer=null, lastChallengeUI=0;
 
 function loadChallenge() {
   const c = CHALLENGES[ci % CHALLENGES.length];
@@ -311,14 +371,21 @@ function loadChallenge() {
   cp = 0;
 }
 
+function setChallengeProgress(c, force=false) {
+  const now = performance.now();
+  if (!force && now - lastChallengeUI < CHALLENGE_UI_GAP) return;
+  lastChallengeUI = now;
+  chpEl.textContent = Math.min(Math.round(cp), c.n) + '/' + c.n;
+}
+
 function progressChallenge(type, amt) {
   if (chFlashTimer !== null) return;
   const c = CHALLENGES[ci % CHALLENGES.length];
   if (c.type !== type) return;
   cp += (amt || 1);
-  chpEl.textContent = Math.min(Math.round(cp), c.n) + '/' + c.n;
+  setChallengeProgress(c, cp >= c.n);
   if (cp >= c.n) {
-    addScore(c.p, null);
+    addScore(c.p, chBarEl);
     chBarEl.classList.add('flash');
     chFlashTimer = setTimeout(() => {
       chBarEl.classList.remove('flash');
@@ -331,15 +398,22 @@ function progressChallenge(type, amt) {
 }
 
 /* ── Popups and Level-up ── */
+let livePopups = 0;
+let lastPopupAt = 0;
 function spawnPopup(text, el) {
+  if (!el || livePopups >= MAX_POPUPS) return;
+  const now = performance.now();
+  if (now - lastPopupAt < POPUP_MIN_GAP) return;
+  lastPopupAt = now;
   const r = el.getBoundingClientRect();
   const p = document.createElement('div');
   p.className = 'popup';
   p.textContent = text;
   p.style.left = (r.left + r.width  * (.15 + Math.random() * .7)) + 'px';
   p.style.top  = (r.top  + r.height * (.15 + Math.random() * .3)) + 'px';
+  livePopups++;
   popLayer.appendChild(p);
-  setTimeout(() => p.remove(), 750);
+  setTimeout(() => { p.remove(); livePopups--; }, 750);
 }
 
 function showLevelUp() {
@@ -351,24 +425,27 @@ function showLevelUp() {
 }
 
 /* ── Score Engine ── */
-function addScore(pts, el) {
+function addScore(pts, el, opts={}) {
   cb++;
   clearTimeout(cbt);
   cbt = setTimeout(() => { cb = 0; comboEl.classList.remove('show'); }, 1400);
   const mx = Math.max(1, Math.floor(cb / 3));
-  if (mx > 1) { comboEl.textContent = 'x' + mx + ' combo'; comboEl.classList.add('show'); }
-  if (cb > bestCb) { bestCb = cb; stEls[1].textContent = bestCb; }
+  if (mx > 1) {
+    comboEl.textContent = 'x' + mx + ' combo';
+    comboEl.classList.add('show');
+  }
+  if (cb > bestCb) { bestCb = cb; statsDirty = true; }
   const earned = pts * mx;
   score += earned;
   xp    += Math.round(earned / 2);
-  scoreEl.textContent = score.toLocaleString();
-  while (xp >= xpForNext()) { xp -= xpForNext(); lv++; beep(880, .15, .2); showLevelUp(); }
-  lvlEl.textContent    = lv;
-  stEls[3].textContent = lv;
-  xpEl.textContent     = Math.round(xp);
-  xpmaxEl.textContent  = xpForNext();
-  xpbarEl.style.width  = (xp / xpForNext() * 100).toFixed(1) + '%';
-  if (el) spawnPopup('+' + earned, el);
+  while (xp >= xpForNext()) {
+    xp -= xpForNext();
+    lv++;
+    beep(880, .15, .2);
+    showLevelUp();
+  }
+  if (opts.popup !== false && el) spawnPopup('+' + earned, el);
+  scheduleUI({ score:true, xp:true, stats:true });
   queueSave();
 }
 
@@ -383,7 +460,7 @@ function gotoFace(i, tab) {
   document.querySelectorAll('.face').forEach((f,j) => f.style.display = j===i ? 'flex' : 'none');
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   tab.classList.add('active');
-  if (i === 5) requestAnimationFrame(() => requestAnimationFrame(resizeDC));
+  if (i === 5) requestAnimationFrame(resizeDC);
 }
 
 /* ── Buttons ── */
@@ -391,7 +468,6 @@ function gc(e, pts, fid, type) {
   vib(15);
   beep(type === 'star' ? 660 : 440, .07, .12);
   taps++;
-  stEls[0].textContent = taps;
   addScore(pts, $(fid));
   progressChallenge('click');
   if (type === 'star') progressChallenge('star');
@@ -406,36 +482,43 @@ function swFlip(i, pts) {
   $('sw' + i).classList.toggle('on', swState[i]);
   addScore(pts, $('f1'));
   progressChallenge('sw');
-  queueSave();
 }
 
 /* ── Joystick ── */
-let jaActive=false, jLastScore=0;
+let jaActive=false, jLastScore=0, joyRect=null, joyRAF=0, joyEvt=null;
 function jReset() {
   jaActive = false;
+  joyEvt = null;
   jnEl.style.transform = 'translate(-50%,-50%)';
   jlEl.textContent = 'drag to score points';
 }
-jbEl.addEventListener('pointerdown', e => {
-  jaActive = true;
-  jbEl.setPointerCapture(e.pointerId);
-  vib(10);
-});
-jbEl.addEventListener('pointermove', e => {
-  if (!jaActive) return;
-  const r  = jbEl.getBoundingClientRect();
-  const dx = e.clientX - (r.left + r.width  * .5);
-  const dy = e.clientY - (r.top  + r.height * .5);
+function processJoyMove() {
+  joyRAF = 0;
+  if (!jaActive || !joyEvt || !joyRect) return;
+  const e = joyEvt;
+  const dx = e.clientX - (joyRect.left + joyRect.width  * .5);
+  const dy = e.clientY - (joyRect.top  + joyRect.height * .5);
   const d  = Math.min(Math.hypot(dx, dy), 42);
   const a  = Math.atan2(dy, dx);
   jnEl.style.transform = `translate(calc(-50% + ${(Math.cos(a)*d).toFixed(1)}px),calc(-50% + ${(Math.sin(a)*d).toFixed(1)}px))`;
-  jlEl.textContent = 'dist ' + Math.round(d) + 'px';
-  const now = Date.now();
+  jlEl.textContent = d > 8 ? 'joystick active' : 'drag to score points';
+  const now = performance.now();
   if (now - jLastScore > 300 && d > 8) {
     jLastScore = now;
     addScore(2, $('f2'));
     beep(330, .04, .05);
   }
+}
+jbEl.addEventListener('pointerdown', e => {
+  jaActive = true;
+  joyRect = jbEl.getBoundingClientRect();
+  jbEl.setPointerCapture(e.pointerId);
+  vib(10);
+});
+jbEl.addEventListener('pointermove', e => {
+  if (!jaActive) return;
+  joyEvt = e;
+  if (!joyRAF) joyRAF = requestAnimationFrame(processJoyMove);
 });
 jbEl.addEventListener('pointerup',     jReset);
 jbEl.addEventListener('pointercancel', jReset);
@@ -443,99 +526,150 @@ jbEl.addEventListener('pointerleave',  () => { if (jaActive) jReset(); });
 
 /* ── Spinner ── */
 let spAngle=0, spVel=0, spDragging=false;
-let spLastAngle=null, spLastTime=null, spWasMoving=false;
+let spLastAngle=null, spLastTime=null, spRAF=0, spEvt=null, spRect=null;
+let spLoopRAF=0, spLastScoreAt=0, spChallengeAccum=0;
 
-srEl.addEventListener('pointerdown', e => {
-  spDragging = true;
-  srEl.setPointerCapture(e.pointerId);
-  const r = srEl.getBoundingClientRect();
-  spLastAngle = Math.atan2(e.clientY - (r.top  + r.height * .5),
-                           e.clientX - (r.left + r.width  * .5));
-  spLastTime = Date.now();
-  vib(10);
-});
-srEl.addEventListener('pointermove', e => {
-  if (!spDragging) return;
-  const r  = srEl.getBoundingClientRect();
-  const cx = r.left + r.width  * .5;
-  const cy = r.top  + r.height * .5;
+function processSpinMove() {
+  spRAF = 0;
+  if (!spDragging || !spEvt || !spRect) return;
+  const e = spEvt;
+  const cx = spRect.left + spRect.width  * .5;
+  const cy = spRect.top  + spRect.height * .5;
   const a  = Math.atan2(e.clientY - cy, e.clientX - cx);
   let da   = a - spLastAngle;
   if (da >  Math.PI) da -= 2 * Math.PI;
   if (da < -Math.PI) da += 2 * Math.PI;
-  const dt = Math.max(Date.now() - spLastTime, 1);
+  const now = performance.now();
+  const dt = Math.max(now - spLastTime, 1);
   spVel       = da / dt * 16;
   spAngle    += da * 180 / Math.PI;
   spLastAngle = a;
-  spLastTime  = Date.now();
+  spLastTime  = now;
   const ad = Math.abs(da * 180 / Math.PI);
   totalSpin   += ad;
-  stEls[2].textContent = Math.round(totalSpin) + '°';
   srEl.style.transform = 'rotate(' + spAngle + 'deg)';
   siEl.style.transform = 'rotate(' + (-spAngle) + 'deg)';
   const rpm = Math.abs(spVel * 60) | 0;
   siEl.textContent = rpm + ' rpm';
-  if (rpm > 0) addScore(Math.max(1, Math.round(rpm / 20)));
-  progressChallenge('spin', ad);
+  spChallengeAccum += ad;
+  if (spChallengeAccum >= 4) {
+    progressChallenge('spin', spChallengeAccum);
+    spChallengeAccum = 0;
+  }
+  if (rpm > 0 && now - spLastScoreAt >= SPINNER_SCORE_GAP) {
+    spLastScoreAt = now;
+    addScore(Math.max(1, Math.round(rpm / 35)), $('f3'));
+  } else {
+    scheduleUI({ stats:true });
+  }
+}
+
+srEl.addEventListener('pointerdown', e => {
+  spDragging = true;
+  spRect = srEl.getBoundingClientRect();
+  srEl.setPointerCapture(e.pointerId);
+  spLastAngle = Math.atan2(e.clientY - (spRect.top  + spRect.height * .5),
+                           e.clientX - (spRect.left + spRect.width  * .5));
+  spLastTime = performance.now();
+  vib(10);
 });
-function spStop() { spDragging = false; }
+srEl.addEventListener('pointermove', e => {
+  if (!spDragging) return;
+  spEvt = e;
+  if (!spRAF) spRAF = requestAnimationFrame(processSpinMove);
+});
+function spStop() {
+  spDragging = false;
+  if (spChallengeAccum > 0) { progressChallenge('spin', spChallengeAccum); spChallengeAccum = 0; }
+  startSpinLoop();
+}
 srEl.addEventListener('pointerup',     spStop);
 srEl.addEventListener('pointercancel', spStop);
 srEl.addEventListener('pointerleave',  spStop);
 
-(function spinLoop() {
+function startSpinLoop() {
+  if (!spLoopRAF && Math.abs(spVel) > 0.001) spLoopRAF = requestAnimationFrame(spinLoop);
+}
+function spinLoop() {
+  spLoopRAF = 0;
   if (!spDragging && Math.abs(spVel) > 0.001) {
-    spWasMoving = true;
-    spVel   *= 0.97;
+    spVel   *= 0.965;
     spAngle += spVel * 180 / Math.PI;
     srEl.style.transform = 'rotate(' + spAngle + 'deg)';
     siEl.style.transform = 'rotate(' + (-spAngle) + 'deg)';
     siEl.textContent = (Math.abs(spVel * 60) | 0) + ' rpm';
-  } else if (spWasMoving && !spDragging) {
-    spWasMoving = false;
+    startSpinLoop();
+  } else if (!spDragging) {
+    spVel = 0;
     siEl.textContent = '0 rpm';
   }
-  requestAnimationFrame(spinLoop);
-})();
+}
 
 /* ── Dial ── */
 let dialAngle=0, dialDragging=false, dialLastAngle=null, dialTotal=0;
+let dialRect=null, dialRAF=0, dialEvt=null, dialLastScoreAt=0, dialScoreAccum=0, dialChallengeAccum=0;
 
-dsvgEl.addEventListener('pointerdown', e => {
-  dialDragging = true;
-  dsvgEl.setPointerCapture(e.pointerId);
-  const r = dsvgEl.getBoundingClientRect();
-  dialLastAngle = Math.atan2(e.clientY - (r.top  + r.height * .5),
-                             e.clientX - (r.left + r.width  * .5));
-  vib(10);
-});
-dsvgEl.addEventListener('pointermove', e => {
-  if (!dialDragging) return;
-  const r  = dsvgEl.getBoundingClientRect();
-  const cx = r.left + r.width  * .5;
-  const cy = r.top  + r.height * .5;
+function processDialMove() {
+  dialRAF = 0;
+  if (!dialDragging || !dialEvt || !dialRect) return;
+  const e  = dialEvt;
+  const cx = dialRect.left + dialRect.width  * .5;
+  const cy = dialRect.top  + dialRect.height * .5;
   const a  = Math.atan2(e.clientY - cy, e.clientX - cx);
   let da   = a - dialLastAngle;
   if (da >  Math.PI) da -= 2 * Math.PI;
   if (da < -Math.PI) da += 2 * Math.PI;
+  const deg = Math.abs(da * 180 / Math.PI);
   dialAngle += da * 180 / Math.PI;
-  dialTotal += Math.abs(da * 180 / Math.PI);
+  dialTotal += deg;
   dialLastAngle = a;
   const rad = dialAngle * Math.PI / 180;
   dhEl.setAttribute('x2', (65 + 51 * Math.sin(rad)).toFixed(2));
   dhEl.setAttribute('y2', (65 - 51 * Math.cos(rad)).toFixed(2));
   dlEl.textContent = Math.round(((dialAngle % 360) + 360) % 360) + '° rotated';
   dpEl.textContent = '+' + Math.round(dialTotal / 10) + ' pts from dial';
-  addScore(1);
-  progressChallenge('dial', Math.abs(da * 180 / Math.PI));
+  dialScoreAccum += deg;
+  dialChallengeAccum += deg;
+  const now = performance.now();
+  if (dialScoreAccum >= 18 && now - dialLastScoreAt >= DIAL_SCORE_GAP) {
+    dialLastScoreAt = now;
+    const pts = Math.max(1, Math.floor(dialScoreAccum / 18));
+    dialScoreAccum = 0;
+    addScore(pts, $('f4'));
+  }
+  if (dialChallengeAccum >= 5) {
+    progressChallenge('dial', dialChallengeAccum);
+    dialChallengeAccum = 0;
+  }
+}
+
+dsvgEl.addEventListener('pointerdown', e => {
+  dialDragging = true;
+  dialRect = dsvgEl.getBoundingClientRect();
+  dsvgEl.setPointerCapture(e.pointerId);
+  dialLastAngle = Math.atan2(e.clientY - (dialRect.top  + dialRect.height * .5),
+                             e.clientX - (dialRect.left + dialRect.width  * .5));
+  vib(10);
 });
-dsvgEl.addEventListener('pointerup',     () => { dialDragging = false; beep(440, .05, .1); });
-dsvgEl.addEventListener('pointercancel', () => { dialDragging = false; });
-dsvgEl.addEventListener('pointerleave',  () => { dialDragging = false; });
+dsvgEl.addEventListener('pointermove', e => {
+  if (!dialDragging) return;
+  dialEvt = e;
+  if (!dialRAF) dialRAF = requestAnimationFrame(processDialMove);
+});
+function dialStop(sound) {
+  dialDragging = false;
+  if (dialScoreAccum >= 9) { addScore(Math.max(1, Math.floor(dialScoreAccum / 18)), $('f4')); }
+  dialScoreAccum = 0;
+  if (dialChallengeAccum > 0) { progressChallenge('dial', dialChallengeAccum); dialChallengeAccum = 0; }
+  if (sound) beep(440, .05, .1);
+}
+dsvgEl.addEventListener('pointerup',     () => dialStop(true));
+dsvgEl.addEventListener('pointercancel', () => dialStop(false));
+dsvgEl.addEventListener('pointerleave',  () => { if (dialDragging) dialStop(false); });
 
 /* ── Draw ── */
 let drawColor='#534AB7', drawActive=false, drawLast=null, drawStrokes=0;
-let dcW=0, dcDPR=1;
+let dcW=0, dcDPR=1, drawRect=null, drawEvt=null, drawRAF=0;
 
 function applyDrawSettings() {
   dctx.lineWidth   = 3;
@@ -555,14 +689,14 @@ function resizeDC() {
   dcW = w; dcDPR = dpr;
   dcEl.style.width  = w + 'px';
   dcEl.style.height = '150px';
-  dcEl.width  = w   * dpr;
-  dcEl.height = 150 * dpr;
-  dctx.scale(dpr, dpr);
+  dcEl.width  = Math.floor(w * dpr);
+  dcEl.height = Math.floor(150 * dpr);
+  dctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   applyDrawSettings();
 }
 
-window.addEventListener('resize', () => { if ($('f5').style.display !== 'none') resizeDC(); });
-requestAnimationFrame(() => requestAnimationFrame(resizeDC));
+window.addEventListener('resize', () => { if ($('f5').style.display !== 'none') requestAnimationFrame(resizeDC); }, { passive:true });
+requestAnimationFrame(resizeDC);
 
 function setDrawColor(c, el) {
   drawColor = c;
@@ -575,54 +709,70 @@ function clearCanvas() {
   dctx.clearRect(0, 0, dcW || dcEl.width, 150);
 }
 
-dcEl.addEventListener('pointerdown', e => {
-  drawActive = true;
-  dcEl.setPointerCapture(e.pointerId);
-  const r = dcEl.getBoundingClientRect();
-  drawLast = { x: e.clientX - r.left, y: e.clientY - r.top };
-  vib(10);
-});
-dcEl.addEventListener('pointermove', e => {
-  if (!drawActive || !drawLast) return;
-  const r = dcEl.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const y = e.clientY - r.top;
+function processDrawMove() {
+  drawRAF = 0;
+  if (!drawActive || !drawLast || !drawEvt || !drawRect) return;
+  const e = drawEvt;
+  const x = e.clientX - drawRect.left;
+  const y = e.clientY - drawRect.top;
   dctx.beginPath();
   dctx.moveTo(drawLast.x, drawLast.y);
   dctx.lineTo(x, y);
   dctx.stroke();
   drawLast = { x, y };
   drawStrokes++;
-  if (drawStrokes % 8 === 0) addScore(2);
+  if (drawStrokes % 12 === 0) addScore(2, $('f5'));
+}
+
+dcEl.addEventListener('pointerdown', e => {
+  drawActive = true;
+  drawRect = dcEl.getBoundingClientRect();
+  dcEl.setPointerCapture(e.pointerId);
+  drawLast = { x: e.clientX - drawRect.left, y: e.clientY - drawRect.top };
+  vib(10);
+});
+dcEl.addEventListener('pointermove', e => {
+  if (!drawActive || !drawLast) return;
+  drawEvt = e;
+  if (!drawRAF) drawRAF = requestAnimationFrame(processDrawMove);
 });
 
-function drawStop(sound) { drawActive = false; drawLast = null; if (sound) beep(330, .06, .08); }
+function drawStop(sound) { drawActive = false; drawLast = null; drawEvt = null; if (sound) beep(330, .06, .08); }
 dcEl.addEventListener('pointerup',     () => drawStop(true));
 dcEl.addEventListener('pointercancel', () => drawStop(false));
 dcEl.addEventListener('pointerleave',  () => drawStop(false));
 
 /* ── Save / Load ── */
 function getSaveData() {
-  return { version:1, score, xp, lv, taps, bestCb, totalSpin, ci, cp, swState, saveEnabled };
+  return { version:2, score, xp, lv, taps, bestCb, totalSpin, ci, cp, swState, saveEnabled };
+}
+
+function idleWriteSave(data) {
+  const write = () => {
+    if (!saveEnabled) return;
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); }
+    catch(err) { console.error('Save failed', err); }
+  };
+  if ('requestIdleCallback' in window) requestIdleCallback(write, { timeout: 1000 });
+  else setTimeout(write, 0);
 }
 
 function queueSave() {
+  if (!saveEnabled) return;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveGame, 1000);
+  saveTimer = setTimeout(() => idleWriteSave(getSaveData()), SAVE_DELAY);
 }
 
 function saveGame() {
   if (!saveEnabled) return;
-  try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(getSaveData()));
-  } catch(err) {
-    console.error('Save failed', err);
-  }
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(getSaveData())); }
+  catch(err) { console.error('Save failed', err); }
 }
 
 function saveGameManually() {
-  localStorage.setItem(SAVE_KEY, JSON.stringify(getSaveData()));
-};
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(getSaveData())); }
+  catch(err) { console.error('Manual save failed', err); }
+}
 
 function loadGame() {
   try {
@@ -640,7 +790,8 @@ function loadGame() {
     saveEnabled = data.saveEnabled ?? true;
     if (Array.isArray(data.swState)) {
       swState.length = 0;
-      data.swState.forEach(s => swState.push(s));
+      data.swState.slice(0,3).forEach(s => swState.push(!!s));
+      while (swState.length < 3) swState.push(false);
     }
     return true;
   } catch(err) {
@@ -662,7 +813,7 @@ function refreshUI() {
   swState.forEach((state, i) => { $('sw' + i).classList.toggle('on', state); });
   const c = CHALLENGES[ci % CHALLENGES.length];
   chtEl.textContent = c.t;
-  chpEl.textContent = Math.min(cp, c.n) + '/' + c.n;
+  chpEl.textContent = Math.min(Math.round(cp), c.n) + '/' + c.n;
 }
 
 /* ── Settings UI ── */
@@ -681,26 +832,17 @@ function updateSaveButton() {
 
 saveToggleBtn.addEventListener('click', () => {
   saveEnabled = !saveEnabled;
-
-  try {
-    const data = getSaveData();
-    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-  } catch (err) {
-    console.error(err);
-  }
-
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(getSaveData())); }
+  catch (err) { console.error(err); }
   updateSaveButton();
 });
 
 resetProgressBtn.addEventListener('click', () => {
- 
   const answer = prompt('Type RESET to delete all progress');
   if (answer !== 'RESET') return;
   localStorage.removeItem(SAVE_KEY);
   saveEnabled = false;
-  saveToggleBtn.textContent = 'Saving OFF';
-  saveToggleBtn.className   = 'settings-btn save-off';
-  localStorage.removeItem(SAVE_KEY);
+  updateSaveButton();
   alert('Progress deleted. Restarting…');
   location.reload();
 });
@@ -708,7 +850,8 @@ resetProgressBtn.addEventListener('click', () => {
 window.addEventListener('beforeunload', saveGame);
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
 
-const fullscreenBtn = document.getElementById("fullscreenBtn");
+/* ── Fullscreen ── */
+const fullscreenBtn = $('fullscreenBtn');
 
 function isFullscreen() {
   return !!(
@@ -722,46 +865,37 @@ function isFullscreen() {
 async function toggleFullscreen() {
   try {
     if (isFullscreen()) {
-      if (document.exitFullscreen) {
-        await document.exitFullscreen();
-      } else if (document.webkitExitFullscreen) {
-        document.webkitExitFullscreen();
-      }
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
     } else {
       const el = document.documentElement;
-
-      if (el.requestFullscreen) {
-        await el.requestFullscreen();
-      } else if (el.webkitRequestFullscreen) {
-        el.webkitRequestFullscreen();
-      }
+      if (el.requestFullscreen) await el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
     }
-  } catch (err) {
-    console.error(err);
-  }
+  } catch (err) { console.error(err); }
 }
 
 function updateFullscreenButton() {
   if (isFullscreen()) {
-    fullscreenBtn.textContent = "\u26F6 Fullscreen ON";
+    fullscreenBtn.textContent = "⛶ Fullscreen ON";
     fullscreenBtn.className = "settings-btn fullscreen-off";
   } else {
-    fullscreenBtn.textContent = "\u26F6 Fullscreen OFF";
+    fullscreenBtn.textContent = "⛶ Fullscreen OFF";
     fullscreenBtn.className = "settings-btn fullscreen-on";
   }
 }
 
 fullscreenBtn.addEventListener("click", toggleFullscreen);
-
 document.addEventListener("fullscreenchange", updateFullscreenButton);
 document.addEventListener("webkitfullscreenchange", updateFullscreenButton);
-
-updateFullscreenButton();
 
 /* ── Init ── */
 loadChallenge();
 if (loadGame()) refreshUI();
 updateSaveButton();
+updateFullscreenButton();
+scheduleUI({ score:true, xp:true, stats:true });
+
 </script>
 </body>
 </html>
